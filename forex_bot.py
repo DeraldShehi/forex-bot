@@ -1,129 +1,250 @@
-import asyncio
-import yfinance as yf
-import numpy as np
-import pandas as pd
-import datetime
-from telegram import Bot
 import os
+import asyncio
+import datetime
+import aiohttp
+import pandas as pd
+import talib as ta
+from io import BytesIO
 from dotenv import load_dotenv
+from telegram import Bot
+from telegram.error import TelegramError
+from pyppeteer import launch
 
-# Ngarko variablat e ambientit
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID"))
-bot = Bot(token=TELEGRAM_TOKEN)
 
-SYMBOLS = {
-    "AUDCAD": "AUDCAD=X",
-    "EURUSD": "EURUSD=X",
-    "XAUUSD": "XAUUSD=X",
-    "BTCUSD": "BTC-USD",
-}
+ALPHA_API_KEY = os.getenv("ALPHA_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Memorizo sinjalet për të shmangur dublikimin
-sent_signals = set()
+if not ALPHA_API_KEY or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise Exception("Vendosni të gjitha çelësat në .env: ALPHA_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID")
 
-def calculate_ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+PAIRS = ["AUDCAD", "EURUSD", "XAUUSD", "BTCUSD"]
 
-def calculate_atr(df, period=14):
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-    return atr
+def eshte_fundjave(pair):
+    now = datetime.datetime.utcnow()
+    weekday = now.weekday()  # 0=Monday, 6=Sunday
+    if pair == "BTCUSD":
+        return False  # Crypto 24/7
+    return weekday >= 5  # Saturday=5, Sunday=6
 
-def is_weekend():
-    weekday = datetime.datetime.utcnow().weekday()
-    return weekday >= 5  # 5=Saturday, 6=Sunday
+async def get_data(symbol, interval="DAILY"):
+    base_url = "https://www.alphavantage.co/query"
+    params = {}
 
-async def send_telegram_message(text):
-    try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
-    except Exception as e:
-        print(f"Gabim gjatë dërgimit në Telegram: {e}")
+    if symbol == "BTCUSD":
+        # Crypto daily
+        function = "DIGITAL_CURRENCY_DAILY"
+        params = {
+            "function": function,
+            "symbol": "BTC",
+            "market": "USD",
+            "apikey": ALPHA_API_KEY
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base_url, params=params) as resp:
+                data = await resp.json()
+        ts_key = "Time Series (Digital Currency Daily)"
+        if ts_key not in data:
+            print(f"⚠️ Nuk u morën të dhëna daily për {symbol} nga Alpha Vantage")
+            return None
+        df = pd.DataFrame.from_dict(data[ts_key], orient="index")
+        print(f"Kolonat origjinale për {symbol} crypto: {list(df.columns)}")
 
-async def analyze_symbol(name, ticker):
-    print(f"\n--- Analizoj {name} ---")
+        rename_map = {
+            '1. open': 'Open',
+            '2. high': 'High',
+            '3. low': 'Low',
+            '4. close': 'Close',
+            '5. volume': 'Volume'
+        }
+        df = df.rename(columns=rename_map)
+        print(f"Kolonat pas riemërtimit për {symbol} crypto: {list(df.columns)}")
 
-    if is_weekend() and "BTC" not in ticker:
-        print(f"Sot është fundjavë, {ticker} nuk analizohet.")
-        return
+        required_cols = ['Open', 'High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            print(f"❌ Mungojnë kolona të domosdoshme për {symbol}: {missing}")
+            return None
 
-    df_daily = yf.download(ticker, period="1mo", interval="1d", progress=False, auto_adjust=True)
-    df_1h = yf.download(ticker, period="7d", interval="60m", progress=False, auto_adjust=True)
+        df = df[required_cols + ['Volume']].astype(float)
+        df.index = pd.to_datetime(df.index)
+        df.sort_index(inplace=True)
+        return df
 
-    if df_daily.empty or df_1h.empty:
-        print(f"Të dhënat nuk janë të mjaftueshme për {ticker}.")
-        return
-
-    ema_daily = calculate_ema(df_daily['Close'], span=20)
-    rsi_daily = calculate_rsi(df_daily['Close'])
-    atr_daily = calculate_atr(df_daily)
-
-    ema_1h = calculate_ema(df_1h['Close'], span=20)
-    rsi_1h = calculate_rsi(df_1h['Close'])
-
-    try:
-        ema_daily_val = ema_daily.iloc[-1].item()
-        rsi_daily_val = rsi_daily.iloc[-1].item()
-        atr_daily_val = atr_daily.iloc[-1].item()
-        ema_1h_val = ema_1h.iloc[-1].item()
-        rsi_1h_val = rsi_1h.iloc[-1].item()
-        current_price = df_1h['Close'].iloc[-1].item()
-    except:
-        print(f"Vlera të paplota (NaN) për {ticker}, skipohet.")
-        return
-
-    print(f"EMA daily: {ema_daily_val:.2f}, RSI daily: {rsi_daily_val:.2f}")
-    print(f"EMA 1H: {ema_1h_val:.2f}, RSI 1H: {rsi_1h_val:.2f}")
-    print(f"ATR daily: {atr_daily_val:.2f}, Current price: {current_price:.2f}")
-
-    buy_signal = (current_price > ema_daily_val and rsi_daily_val > 50) and (rsi_1h_val < 30 and current_price > ema_1h_val)
-    sell_signal = (current_price < ema_daily_val and rsi_daily_val < 50) and (rsi_1h_val > 70 and current_price < ema_1h_val)
-
-    signal_id = f"{name}-{datetime.datetime.utcnow().strftime('%Y-%m-%d-%H')}"
-
-    if buy_signal and signal_id not in sent_signals:
-        msg = f"📈 Buy Signal për {name}!\nÇmimi aktual: {current_price:.2f}\nEMA daily: {ema_daily_val:.2f}, RSI daily: {rsi_daily_val:.2f}"
-        print(msg)
-        await send_telegram_message(msg)
-        sent_signals.add(signal_id)
-
-    elif sell_signal and signal_id not in sent_signals:
-        msg = f"📉 Sell Signal për {name}!\nÇmimi aktual: {current_price:.2f}\nEMA daily: {ema_daily_val:.2f}, RSI daily: {rsi_daily_val:.2f}"
-        print(msg)
-        await send_telegram_message(msg)
-        sent_signals.add(signal_id)
     else:
-        print("Nuk ka sinjal të ri ose është dërguar më parë.")
+        # Forex
+        if interval == "DAILY":
+            function = "FX_DAILY"
+            params = {
+                "function": function,
+                "from_symbol": symbol[:3],
+                "to_symbol": symbol[3:],
+                "outputsize": "compact",
+                "apikey": ALPHA_API_KEY
+            }
+        else:
+            function = "FX_INTRADAY"
+            params = {
+                "function": function,
+                "from_symbol": symbol[:3],
+                "to_symbol": symbol[3:],
+                "interval": interval.lower(),
+                "outputsize": "compact",
+                "apikey": ALPHA_API_KEY
+            }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base_url, params=params) as resp:
+                data = await resp.json()
 
-async def analyze_all():
-    for name, ticker in SYMBOLS.items():
-        await analyze_symbol(name, ticker)
+        if interval == "DAILY":
+            ts_key = "Time Series FX (Daily)"
+        else:
+            ts_key = f"Time Series FX ({interval})"
+        if ts_key not in data:
+            print(f"⚠️ Nuk u morën të dhëna {interval.lower()} për {symbol}")
+            return None
+        df = pd.DataFrame.from_dict(data[ts_key], orient="index")
+        rename_map = {
+            '1. open': 'Open',
+            '2. high': 'High',
+            '3. low': 'Low',
+            '4. close': 'Close',
+            '5. volume': 'Volume'
+        }
+        df = df.rename(columns=rename_map)
+
+        required_cols = ['Open', 'High', 'Low', 'Close']
+        if not all(col in df.columns for col in required_cols):
+            missing = [col for col in required_cols if col not in df.columns]
+            print(f"❌ Mungojnë kolona të domosdoshme për {symbol}: {missing}")
+            return None
+
+        df = df[required_cols + ['Volume']].astype(float)
+        df.index = pd.to_datetime(df.index)
+        df.sort_index(inplace=True)
+        return df
+
+async def get_tv_screenshot(symbol, interval):
+    url = f"https://www.tradingview.com/chart/?symbol={symbol}:{interval}"
+    browser = await launch(headless=True, args=["--no-sandbox"])
+    page = await browser.newPage()
+    await page.goto(url)
+    await asyncio.sleep(5)
+    screenshot = await page.screenshot()
+    await browser.close()
+    return screenshot
+
+def analyze_signals(df):
+    close = df['Close'].values
+    high = df['High'].values
+    low = df['Low'].values
+
+    ema_50 = ta.EMA(close, timeperiod=50)
+    ema_200 = ta.EMA(close, timeperiod=200)
+    rsi = ta.RSI(close, timeperiod=14)
+    atr = ta.ATR(high, low, close, timeperiod=14)
+
+    latest = -1
+    signal = None
+
+    if ema_50[latest] > ema_200[latest]:
+        trend = "Bullish"
+    else:
+        trend = "Bearish"
+
+    if rsi[latest] < 30 and trend == "Bullish":
+        signal = "BUY"
+    elif rsi[latest] > 70 and trend == "Bearish":
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    sl = None
+    tp = None
+    rr = None
+    if signal == "BUY":
+        sl = close[latest] - 1.5 * atr[latest]
+        tp = close[latest] + 3 * atr[latest]
+        rr = (tp - close[latest]) / (close[latest] - sl)
+    elif signal == "SELL":
+        sl = close[latest] + 1.5 * atr[latest]
+        tp = close[latest] - 3 * atr[latest]
+        rr = (close[latest] - tp) / (sl - close[latest])
+
+    return {
+        "signal": signal,
+        "trend": trend,
+        "rsi": rsi[latest],
+        "ema_50": ema_50[latest],
+        "ema_200": ema_200[latest],
+        "sl": sl,
+        "tp": tp,
+        "rr": rr,
+        "price": close[latest]
+    }
+
+async def send_telegram_signal(pair, analysis, screenshot_bytes):
+    message = (
+        f"📊 Sinjal Trading për {pair}\n"
+        f"Trend: {analysis['trend']}\n"
+        f"Sinjal: {analysis['signal']}\n"
+        f"Çmimi aktual: {analysis['price']:.4f}\n"
+        f"RSI: {analysis['rsi']:.2f}\n"
+        f"EMA50: {analysis['ema_50']:.4f}\n"
+        f"EMA200: {analysis['ema_200']:.4f}\n"
+        f"SL: {analysis['sl']:.4f}\n"
+        f"TP: {analysis['tp']:.4f}\n"
+        f"Risk/Reward: {analysis['rr']:.2f}"
+    )
+
+    try:
+        await bot.send_photo(
+            chat_id=TELEGRAM_CHAT_ID,
+            photo=BytesIO(screenshot_bytes),
+            caption=message
+        )
+        print(f"✅ Sinjali u dërgua në Telegram për {pair}")
+    except TelegramError as e:
+        print(f"❌ Gabim gjatë dërgimit të sinjalit në Telegram: {e}")
+
+async def analyze(pair):
+    print(f"--- Analizoj {pair} ---")
+    if eshte_fundjave(pair):
+        print(f"⏸ {pair} nuk analizohet në fundjavë.")
+        return
+
+    df_daily = await get_data(pair, "DAILY")
+    df_1h = await get_data(pair, "60min")
+
+    if df_daily is None or df_1h is None:
+        print(f"⚠️ Të dhënat mungojnë për {pair}")
+        return
+
+    analysis_daily = analyze_signals(df_daily)
+    analysis_1h = analyze_signals(df_1h)
+
+    screenshot = await get_tv_screenshot(pair, "1H")
+
+    if analysis_1h['signal'] in ["BUY", "SELL"]:
+        await send_telegram_signal(pair, analysis_1h, screenshot)
+    else:
+        print(f"Sinjal HOLD për {pair}, nuk dërgohet në Telegram.")
 
 async def main_loop():
+    print("[INFO] Bot po nis dhe do të punojë në loop të pafund...")
     while True:
-        print(f"\n⏱️ Fillon cikli i analizës: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        await analyze_all()
-        print("✅ Cikli i analizës përfundoi. Pritet 1 orë...\n")
-        await asyncio.sleep(3600)
-
-async def start():
-    print("🚀 Bot është online...")
-    await send_telegram_message("🤖 Forex Bot është online!")
-    await main_loop()
+        print(f"\n--- Nis analiza në {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+        try:
+            tasks = [asyncio.create_task(analyze(pair)) for pair in PAIRS]
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            print(f"[ERROR] Gabim gjatë analizës: {e}")
+        print("[INFO] Pushim 10 minuta para analizës tjetër...\n")
+        await asyncio.sleep(600)  # 10 minuta
 
 if __name__ == "__main__":
-    asyncio.run(start())
+    asyncio.run(main_loop())
+

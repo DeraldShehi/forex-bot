@@ -1,5 +1,5 @@
-yfinance
-numpy
 pandas
+numpy
+ta
+aiohttp
 python-telegram-bot
-python-dotenv
