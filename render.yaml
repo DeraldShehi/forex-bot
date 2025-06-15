@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: forex-bot
+    runtime: python
+    repo: https://github.com/deraldshehi/forex-bot
+    branch: main
+    startCommand: python3 main.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TWELVEDATA_API_KEY
+        sync: false
