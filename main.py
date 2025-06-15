@@ -1,11 +1,13 @@
 import asyncio
 from data_fetch import get_data
 from analysis import analyze_signals
-from telegram_bot import send_telegram_signal
+from my_telegram_bot import send_telegram_signal
 from screenshot import get_tv_screenshot
 from utils import eshte_fundjave, eshte_gjate_sesioneve
 import datetime
 from dotenv import load_dotenv
+
+
 
 load_dotenv()
 
