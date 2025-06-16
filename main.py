@@ -52,6 +52,10 @@ async def analyze(pair):
     else:
         current_daily_pnl += 1.5
 
+    print(f"✅ {pair}: Sinjal i konfirmuar dhe dërguar në Telegram.")
+
+
+
 async def loop():
     print("[INFO] Bot në punë (çdo 1 orë)...")
     while True:

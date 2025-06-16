@@ -3,8 +3,11 @@ import asyncio
 import os
 import pandas as pd
 from datetime import datetime
+from dotenv import load_dotenv
 
+load_dotenv()
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
+
 
 async def get_data_twelvedata(symbol: str, interval: str):
     url = "https://api.twelvedata.com/time_series"
@@ -34,7 +37,11 @@ async def get_data_twelvedata(symbol: str, interval: str):
                 "volume": "Volume",
                 "datetime": "Timestamp"
             }, inplace=True)
-            df[["Open", "High", "Low", "Close", "Volume"]] = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+            float_columns = ["Open", "High", "Low", "Close"]
+            if "Volume" in df.columns:
+                float_columns.append("Volume")
+
+            df[float_columns] = df[float_columns].astype(float)
             df["Timestamp"] = pd.to_datetime(df["Timestamp"])
             df.sort_values("Timestamp", inplace=True)
             df.set_index("Timestamp", inplace=True)
