@@ -1,4 +1,5 @@
 import asyncio
+from aiohttp import web
 from data_fetch import get_data
 from analysis import analyze_signals
 from my_telegram_bot import send_telegram_signal
@@ -6,8 +7,7 @@ from screenshot import get_tv_screenshot
 from utils import eshte_fundjave, eshte_gjate_sesioneve
 import datetime
 from dotenv import load_dotenv
-
-
+import os
 
 load_dotenv()
 
@@ -52,11 +52,9 @@ async def analyze(pair):
     else:
         current_daily_pnl += 1.5
 
-    print(f"✅ {pair}: Sinjal i konfirmuar dhe dërguar në Telegram.")
+    print(f"[{pair}] Sinjal dërguar me sukses.")
 
-
-
-async def loop():
+async def bot_loop():
     print("[INFO] Bot në punë (çdo 1 orë)...")
     while True:
         print(f"\n--- {datetime.datetime.utcnow()} ---")
@@ -64,5 +62,21 @@ async def loop():
         print("[INFO] Pushim 1 orë...\n")
         await asyncio.sleep(3600)
 
+async def handle(request):
+    return web.Response(text="Bot është online dhe po funksionon.")
+
+async def start_server_and_bot():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Server po dëgjon në port {port}")
+
+    # Nis bot loop në sfond
+    await bot_loop()
+
 if __name__ == "__main__":
-    asyncio.run(loop())
+    asyncio.run(start_server_and_bot())
